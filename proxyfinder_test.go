@@ -82,7 +82,7 @@ func TestFallbackToDirectWhenNotConnected(t *testing.T) {
 
 // Removed TestFallbackToDirectWhenNoPACURL - behaviour is fallback to system default when no PACURL, test case TestFallbackToDefaultWhenNoPACUrl
 
-func TestSkipBadProxies(t *testing.T) {
+func TestDemotedProxyRotation(t *testing.T) {
 	js := `function FindProxyForURL(url, host) { return "PROXY primary:80; PROXY backup:80" }`
 	server := httptest.NewServer(http.HandlerFunc(pacjsHandler(js)))
 	defer server.Close()
@@ -91,14 +91,17 @@ func TestSkipBadProxies(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://www.test", nil)
 	ctx := context.WithValue(req.Context(), contextKeyID, 0)
 	req = req.WithContext(ctx)
+	// Initially, primary should be returned (PAC order)
 	proxy, err := pf.findProxyForRequest(req)
 	require.NoError(t, err)
 	assert.Equal(t, "primary:80", proxy.Host)
-	pf.blocked.add("primary:80")
+	// After demoting primary, backup should be returned first
+	pf.rotation.demote("primary:80")
 	proxy, err = pf.findProxyForRequest(req)
 	require.NoError(t, err)
 	assert.Equal(t, "backup:80", proxy.Host)
-	pf.blocked.add("backup:80")
+	// After demoting backup too, primary should be preferred (demoted less recently)
+	pf.rotation.demote("backup:80")
 	proxy, err = pf.findProxyForRequest(req)
 	require.NoError(t, err)
 	assert.Equal(t, "primary:80", proxy.Host)

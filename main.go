@@ -125,7 +125,7 @@ func main() {
 func createServer(port int, pacurl string, a *authenticator) *http.Server {
 	pacWrapper := NewPACWrapper(PACData{Port: port})
 	proxyFinder := NewProxyFinder(pacurl, pacWrapper)
-	proxyHandler := NewProxyHandler(a, getProxyFromContext, proxyFinder.blockProxy)
+	proxyHandler := NewProxyHandler(a, getProxyFromContext, proxyFinder.demoteProxy)
 	mux := http.NewServeMux()
 	pacWrapper.SetupHandlers(mux)
 

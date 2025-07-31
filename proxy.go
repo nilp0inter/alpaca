@@ -17,7 +17,6 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -32,14 +31,14 @@ var tlsClientConfig *tls.Config
 type ProxyHandler struct {
 	transport *http.Transport
 	auth      *authenticator
-	block     func(string)
+	demote    func(string)
 }
 
 type proxyFunc func(*http.Request) (*url.URL, error)
 
-func NewProxyHandler(auth *authenticator, proxy proxyFunc, block func(string)) ProxyHandler {
+func NewProxyHandler(auth *authenticator, proxy proxyFunc, demote func(string)) ProxyHandler {
 	tr := &http.Transport{Proxy: proxy, TLSClientConfig: tlsClientConfig}
-	return ProxyHandler{tr, auth, block}
+	return ProxyHandler{tr, auth, demote}
 }
 
 func (ph ProxyHandler) WrapHandler(next http.Handler) http.Handler {
@@ -80,10 +79,9 @@ func (ph ProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
 		server, err = connectDirect(req)
 	} else {
 		server, err = connectViaProxy(req, proxy, ph.auth)
-		var oe *net.OpError
-		if errors.As(err, &oe) && oe.Op == "proxyconnect" {
-			log.Printf("[%d] Temporarily blocking proxy: %q", id, proxy.Host)
-			ph.block(proxy.Host)
+		if err != nil {
+			log.Printf("[%d] Demoting proxy: %q", id, proxy.Host)
+			ph.demote(proxy.Host)
 		}
 	}
 	if err != nil {
@@ -192,15 +190,10 @@ func (ph ProxyHandler) proxyRequest(w http.ResponseWriter, req *http.Request, au
 	if err != nil {
 		log.Printf("[%d] Error forwarding request: %v", id, err)
 		w.WriteHeader(http.StatusBadGateway)
-		var oe *net.OpError
-		if errors.As(err, &oe) && oe.Op == "proxyconnect" {
-			proxy, err := ph.transport.Proxy(req)
-			if err != nil {
-				log.Printf("[%d] Proxy connect error to unknown proxy: %v", id, err)
-				return
-			}
-			log.Printf("[%d] Temporarily blocking proxy: %q", id, proxy.Host)
-			ph.block(proxy.Host)
+		proxy, perr := ph.transport.Proxy(req)
+		if perr == nil && proxy != nil {
+			log.Printf("[%d] Demoting proxy: %q", id, proxy.Host)
+			ph.demote(proxy.Host)
 		}
 		return
 	}
