@@ -57,11 +57,18 @@ func main() {
 	flag.Var(&hosts, "l", "address to listen on")
 	port := flag.Int("p", 3128, "port number to listen on")
 	pacurl := flag.String("C", "", "url of proxy auto-config (pac) file")
+	certFile := flag.String("cert-file", "", "path to a TLS certificate file")
+	keyFile := flag.String("key-file", "", "path to a TLS key file")
+	basicAuth := flag.String("basic-auth", "", "basic authentication credentials in 'user:pass' format")
 	domain := flag.String("d", "", "domain of the proxy account (for NTLM auth)")
 	username := flag.String("u", whoAmI(), "username of the proxy account (for NTLM auth)")
 	printHash := flag.Bool("H", false, "print hashed NTLM credentials for non-interactive use")
 	version := flag.Bool("version", false, "print version number")
 	flag.Parse()
+
+	if (*certFile == "") != (*keyFile == "") {
+		log.Fatal("Both --cert-file and --key-file must be provided")
+	}
 
 	// default to localhost if no hosts are specified
 	if len(hosts) == 0 {
@@ -103,7 +110,7 @@ func main() {
 
 	errch := make(chan error)
 
-	s := createServer(*port, *pacurl, a)
+	s := createServer(*port, *pacurl, a, *basicAuth)
 	for _, host := range hosts {
 		address := net.JoinHostPort(host, strconv.Itoa(*port))
 		for _, network := range networks(host) {
@@ -111,10 +118,22 @@ func main() {
 				l, err := net.Listen(network, address)
 				if err != nil {
 					errch <- err
+					return
+				}
+				listener := l
+				if *certFile != "" {
+					cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
+					if err != nil {
+						errch <- fmt.Errorf("could not load TLS cert: %v", err)
+						return
+					}
+					cfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+					listener = tls.NewListener(l, cfg)
+					log.Printf("Listening for HTTPS on %s %s", network, address)
 				} else {
 					log.Printf("Listening on %s %s", network, address)
-					errch <- s.Serve(l)
 				}
+				errch <- s.Serve(listener)
 			}(network)
 		}
 	}
@@ -122,7 +141,7 @@ func main() {
 	log.Fatal(<-errch)
 }
 
-func createServer(port int, pacurl string, a *authenticator) *http.Server {
+func createServer(port int, pacurl string, a *authenticator, basicAuth string) *http.Server {
 	pacWrapper := NewPACWrapper(PACData{Port: port})
 	proxyFinder := NewProxyFinder(pacurl, pacWrapper)
 	proxyHandler := NewProxyHandler(a, getProxyFromContext, proxyFinder.blockProxy)
@@ -132,6 +151,9 @@ func createServer(port int, pacurl string, a *authenticator) *http.Server {
 	// build the handler by wrapping middleware upon middleware
 	var handler http.Handler = mux
 	handler = RequestLogger(handler)
+	if basicAuth != "" {
+		handler = basicAuthMiddleware(handler, basicAuth)
+	}
 	handler = proxyHandler.WrapHandler(handler)
 	handler = proxyFinder.WrapHandler(handler)
 	handler = AddContextID(handler)

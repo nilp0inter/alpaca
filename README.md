@@ -115,6 +115,50 @@ $ curl -s https://raw.githubusercontent.com/samuong/alpaca/master/README.md
 ...
 ```
 
+### HTTPS Proxy
+
+You can also run Alpaca as an HTTPS proxy. To do this, you'll need a TLS
+certificate and key. You can generate a self-signed certificate using
+`openssl`:
+
+```sh
+$ openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+```
+
+Then, you can start Alpaca with the `--cert-file` and `--key-file` flags:
+
+```sh
+$ alpaca --cert-file cert.pem --key-file key.pem
+```
+
+You'll also need to configure your tools to trust the self-signed certificate.
+For `curl`, you can use the `--cacert` flag:
+
+```sh
+$ export https_proxy=https://localhost:3128
+$ curl --cacert cert.pem -s https://raw.githubusercontent.com/samuong/alpaca/master/README.md
+# Alpaca
+...
+```
+
+### Basic Authentication
+
+Alpaca also supports basic authentication. To use it, you can provide a
+username and password with the `--basic-auth` flag:
+
+```sh
+$ alpaca --basic-auth 'user:pass'
+```
+
+Then, you can configure your tools to use these credentials:
+
+```sh
+$ export http_proxy=http://user:pass@localhost:3128
+$ curl -s https://raw.githubusercontent.com/samuong/alpaca/master/README.md
+# Alpaca
+...
+```
+
 When moving from, say, a corporate network to a public WiFi network (or
 vice-versa), the proxies listed in the PAC script might become unreachable.
 When this happens, Alpaca will temporarily bypass the parent proxy and send
