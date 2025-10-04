@@ -19,13 +19,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestFindProxyForRequest(t *testing.T) {
+func TestFindProxiesForRequest(t *testing.T) {
 	tests := []struct {
 		name        string
 		body        string
@@ -54,18 +55,21 @@ func TestFindProxyForRequest(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "https://www.test", nil)
 			ctx := context.WithValue(req.Context(), contextKeyID, i)
 			req = req.WithContext(ctx)
-			proxy, err := pf.findProxyForRequest(req)
+			proxies, err := pf.findProxiesForRequest(req)
 			if test.expectError {
 				assert.NotNil(t, err)
 				return
 			}
 			require.NoError(t, err)
 			if test.expected == "" {
-				assert.Nil(t, proxy)
+				require.NotNil(t, proxies)
+				require.Len(t, proxies, 1)
+				assert.Nil(t, proxies[0])
 				return
 			}
-			require.NotNil(t, proxy)
-			assert.Equal(t, test.expected, proxy.Host)
+			require.NotNil(t, proxies)
+			require.NotEmpty(t, proxies)
+			assert.Equal(t, test.expected, proxies[0].Host)
 		})
 	}
 }
@@ -75,9 +79,11 @@ func TestFallbackToDirectWhenNotConnected(t *testing.T) {
 	pw := NewPACWrapper(PACData{Port: 1})
 	pf := NewProxyFinder(url, pw)
 	req := httptest.NewRequest(http.MethodGet, "http://www.test", nil)
-	proxy, err := pf.findProxyForRequest(req)
+	proxies, err := pf.findProxiesForRequest(req)
 	require.NoError(t, err)
-	assert.Nil(t, proxy)
+	require.NotNil(t, proxies)
+	require.Len(t, proxies, 1)
+	assert.Nil(t, proxies[0])
 }
 
 // Removed TestFallbackToDirectWhenNoPACURL - behaviour is fallback to system default when no PACURL, test case TestFallbackToDefaultWhenNoPACUrl
@@ -91,15 +97,35 @@ func TestSkipBadProxies(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://www.test", nil)
 	ctx := context.WithValue(req.Context(), contextKeyID, 0)
 	req = req.WithContext(ctx)
-	proxy, err := pf.findProxyForRequest(req)
+
+	var proxy *url.URL
+	var err error
+
+	// No proxies blocked
+	handler1 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy, err = getProxyFromContext(r)
+	})
+	pf.WrapHandler(handler1).ServeHTTP(httptest.NewRecorder(), req)
 	require.NoError(t, err)
+	require.NotNil(t, proxy)
 	assert.Equal(t, "primary:80", proxy.Host)
+
+	// Block primary proxy
 	pf.blocked.add("primary:80")
-	proxy, err = pf.findProxyForRequest(req)
+	handler2 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy, err = getProxyFromContext(r)
+	})
+	pf.WrapHandler(handler2).ServeHTTP(httptest.NewRecorder(), req)
 	require.NoError(t, err)
+	require.NotNil(t, proxy)
 	assert.Equal(t, "backup:80", proxy.Host)
+
+	// Block both proxies
 	pf.blocked.add("backup:80")
-	proxy, err = pf.findProxyForRequest(req)
+	handler3 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy, err = getProxyFromContext(r)
+	})
+	pf.WrapHandler(handler3).ServeHTTP(httptest.NewRecorder(), req)
 	require.NoError(t, err)
-	assert.Equal(t, "primary:80", proxy.Host)
+	assert.Nil(t, proxy)
 }
