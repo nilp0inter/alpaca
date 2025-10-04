@@ -139,17 +139,31 @@ func TestProxyHTTP2(t *testing.T) {
 	assert.Equal(t, []string{"CONNECT to proxy", "GET to server"}, r.requests)
 }
 
-func newDirectProxy() ProxyHandler {
-	return NewProxyHandler(nil, http.ProxyURL(nil), func(string) {})
+func newDirectProxy(next ...http.Handler) http.Handler {
+	proxyHandler := NewProxyHandler(nil, http.ProxyURL(nil), func(string) {})
+	var finalHandler http.Handler
+	if len(next) > 0 {
+		finalHandler = proxyHandler.WrapHandler(next[0])
+	} else {
+		finalHandler = http.HandlerFunc(proxyHandler.ServeHTTP)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		ctx := context.WithValue(req.Context(), contextKeyProxies, []*url.URL{nil})
+		finalHandler.ServeHTTP(w, req.WithContext(ctx))
+	})
 }
 
 func newChildProxy(parent *httptest.Server) http.Handler {
-	parentURL := &url.URL{Host: parent.Listener.Addr().String()}
-	childProxy := NewProxyHandler(nil, getProxyFromContext, func(string) {})
+	parentURL, err := url.Parse(parent.URL)
+	if err != nil {
+		panic(err)
+	}
+	handler := NewProxyHandler(nil, getProxyFromContext, func(string) {})
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		ctx := context.WithValue(req.Context(), contextKeyProxy, parentURL)
-		reqWithProxy := req.WithContext(ctx)
-		childProxy.ServeHTTP(w, reqWithProxy)
+		proxies := []*url.URL{parentURL}
+		ctx := context.WithValue(req.Context(), contextKeyProxies, proxies)
+		ctx = context.WithValue(ctx, contextKeyProxy, parentURL)
+		handler.ServeHTTP(w, req.WithContext(ctx))
 	})
 }
 
@@ -171,7 +185,7 @@ func TestGetOriginURLsNotProxied(t *testing.T) {
 		_, err := w.Write([]byte("Hello, client\n"))
 		require.NoError(t, err)
 	})
-	proxy := httptest.NewServer(newDirectProxy().WrapHandler(mux))
+	proxy := httptest.NewServer(newDirectProxy(mux))
 	defer proxy.Close()
 	client := &http.Client{Transport: &http.Transport{}}
 	resp, err := client.Get(proxy.URL + "/origin")

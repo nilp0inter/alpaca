@@ -71,19 +71,32 @@ func (ph ProxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (ph ProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
 	// Establish a connection to the server, or an upstream proxy.
 	id := req.Context().Value(contextKeyID)
-	proxy, err := ph.transport.Proxy(req)
-	if err != nil {
-		log.Printf("[%d] Error finding proxy for request: %v", id, err)
+	proxies, ok := req.Context().Value(contextKeyProxies).([]*url.URL)
+	if !ok {
+		// This shouldn't happen, because the proxy finder should always put a list of
+		// proxies in the context, even if it's just a direct connection.
+		log.Printf("[%d] No proxies found in context", id)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	var server net.Conn
-	if proxy == nil {
-		server, err = connectDirect(req)
-	} else {
-		server, err = connectViaProxy(req, proxy, ph.auth)
-		var oe *net.OpError
-		if errors.As(err, &oe) && oe.Op == "proxyconnect" {
-			log.Printf("[%d] Temporarily blocking proxy: %q", id, proxy.Host)
-			ph.block(proxy.Host)
+	var err error
+	for _, proxy := range proxies {
+		if proxy == nil {
+			server, err = connectDirect(req)
+		} else {
+			server, err = connectViaProxy(req, proxy, ph.auth)
+			if err != nil {
+				var oe *net.OpError
+				if errors.As(err, &oe) && oe.Op == "proxyconnect" {
+					log.Printf("[%d] Temporarily blocking proxy: %q", id, proxy.Host)
+					ph.block(proxy.Host)
+				}
+				continue
+			}
+		}
+		if err == nil {
+			break
 		}
 	}
 	if err != nil {

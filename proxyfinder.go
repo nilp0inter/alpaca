@@ -25,7 +25,6 @@ import (
 	"sync"
 )
 
-const contextKeyProxy = contextKey("proxy")
 
 func getProxyFromContext(req *http.Request) (*url.URL, error) {
 	if value := req.Context().Value(contextKeyProxy); value != nil {
@@ -54,16 +53,25 @@ func NewProxyFinder(pacurl string, wrapper *PACWrapper) *ProxyFinder {
 func (pf *ProxyFinder) WrapHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		pf.checkForUpdates()
-		proxy, err := pf.findProxyForRequest(req)
+		proxies, err := pf.findProxiesForRequest(req)
 		if err != nil {
 			log.Printf("[%d] %v", req.Context().Value(contextKeyID), err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if proxy != nil {
-			ctx := context.WithValue(req.Context(), contextKeyProxy, proxy)
-			req = req.WithContext(ctx)
+		ctx := context.WithValue(req.Context(), contextKeyProxies, proxies)
+		// For backwards compatibility, also add the first usable proxy to the context.
+		// This is used for non-CONNECT requests.
+		for _, proxy := range proxies {
+			if proxy == nil { // DIRECT
+				break
+			}
+			if !pf.blocked.contains(proxy.Host) {
+				ctx = context.WithValue(ctx, contextKeyProxy, proxy)
+				break
+			}
 		}
+		req = req.WithContext(ctx)
 		next.ServeHTTP(w, req)
 	})
 }
@@ -87,22 +95,22 @@ func (pf *ProxyFinder) checkForUpdates() {
 	}
 }
 
-func (pf *ProxyFinder) findProxyForRequest(req *http.Request) (*url.URL, error) {
+func (pf *ProxyFinder) findProxiesForRequest(req *http.Request) ([]*url.URL, error) {
 	id := req.Context().Value(contextKeyID)
 	if pf.fetcher == nil {
 		log.Printf(`[%d] %s %s via "DIRECT"`, id, req.Method, req.URL)
-		return nil, nil
+		return []*url.URL{nil}, nil
 	}
 	if !pf.fetcher.isConnected() {
 		log.Printf(`[%d] %s %s via "DIRECT" (not connected to PAC server)`,
 			id, req.Method, req.URL)
-		return nil, nil
+		return []*url.URL{nil}, nil
 	}
 	str, err := pf.runner.FindProxyForURL(*req.URL)
 	if err != nil {
 		return nil, err
 	}
-	var fallback *url.URL
+	var proxies []*url.URL
 	for _, elem := range strings.Split(str, ";") {
 		fields := strings.Fields(strings.TrimSpace(elem))
 		var scheme string
@@ -111,7 +119,7 @@ func (pf *ProxyFinder) findProxyForRequest(req *http.Request) (*url.URL, error) 
 			continue
 		} else if fields[0] == "DIRECT" {
 			log.Printf("[%d] %s %s via %q", id, req.Method, req.URL, elem)
-			return nil, nil
+			proxies = append(proxies, nil)
 		} else if fields[0] == "PROXY" || fields[0] == "HTTP" {
 			scheme = "http"
 			defaultPort = "80"
@@ -122,25 +130,19 @@ func (pf *ProxyFinder) findProxyForRequest(req *http.Request) (*url.URL, error) 
 			log.Printf("[%d] Couldn't parse proxy: %q", id, elem)
 			continue
 		}
-		proxy := &url.URL{Scheme: scheme, Host: fields[1]}
-		if proxy.Port() == "" {
-			proxy.Host = net.JoinHostPort(proxy.Host, defaultPort)
-		}
-		if pf.blocked.contains(proxy.Host) {
-			if fallback == nil {
-				fallback = proxy
+		if scheme != "" {
+			proxy := &url.URL{Scheme: scheme, Host: fields[1]}
+			if proxy.Port() == "" {
+				proxy.Host = net.JoinHostPort(proxy.Host, defaultPort)
 			}
-			continue
+			log.Printf("[%d] %s %s via %q", id, req.Method, req.URL, elem)
+			proxies = append(proxies, proxy)
 		}
-		log.Printf("[%d] %s %s via %q", id, req.Method, req.URL, elem)
-		return proxy, nil
 	}
-	if fallback != nil {
-		// All the proxies are currently blocked. In this case, we'll temporarily ignore the
-		// blocklist and fall back to the first proxy that we saw (and skipped).
-		return fallback, nil
+	if len(proxies) == 0 {
+		return nil, errors.New("no proxies available")
 	}
-	return nil, errors.New("no proxies available")
+	return proxies, nil
 }
 
 func (pf *ProxyFinder) blockProxy(proxy string) {
